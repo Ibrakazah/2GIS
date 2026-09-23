@@ -341,6 +341,7 @@ def save_draft(db_path, review_id, draft_text, source):
 
 
 def get_drafts_map(db_path, review_ids):
+
     if not review_ids:
         return {}
     conn = sqlite3.connect(db_path)
@@ -351,7 +352,82 @@ def get_drafts_map(db_path, review_ids):
     return {r["review_id"]: dict(r) for r in rows}
 
 
-# --- автогенерация для НОВЫХ отзывов (появившихся после включения фичи) ---
+# --- месячная аналитика: кэш сводок ИИ ---
+def ensure_monthly_table(db_path="reviews.db"):
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS ai_monthly (
+        month_key TEXT PRIMARY KEY,
+        summary TEXT,
+        source TEXT,
+        stats_json TEXT,
+        created_at TEXT
+    )
+    """)
+    conn.commit()
+    conn.close()
+
+
+MONTH_SYSTEM = (
+    "Ты — аналитик ресторана грузинской кухни. По списку отзывов гостей за месяц составь "
+    "краткую деловую сводку на русском языке строго в формате:\n"
+    "1. Общий вывод (2-3 предложения: динамика, средняя оценка).\n"
+    "2. Три главных плюса (что хвалят чаще всего).\n"
+    "3. Три главных минуса (на что жалуются чаще всего).\n"
+    "4. Что исправить в первую очередь (2-3 конкретных пункта).\n"
+    "Без эмодзи, без воды, только по фактам из отзывов."
+)
+
+
+def summarize_month(reviews, branch_name=BRANCH_NAME_DEFAULT, month_label=""):
+    """Одна сводка по всем отзывам месяца. Возвращает (summary, source)."""
+    lines = []
+    for r in reviews:
+        lines.append(f"- [{r.get('rating', '?')}/5, {str(r.get('date_created') or '')[:10]}] "
+                     f"{(r.get('text') or '(без текста)')[:400]}")
+        if sum(len(x) for x in lines) > 9000:
+            lines.append(f"... и еще {len(reviews) - len(lines)} отзывов")
+            break
+    user_prompt = (f"Ресторан: {branch_name}\nПериод: {month_label}\n"
+                   f"Всего отзывов: {len(reviews)}\n\nОтзывы:\n" + "\n".join(lines))
+    if not AI_API_KEY:
+        return "Нет API-ключа: сводка недоступна (STUB).", "stub"
+    models = [AI_MODEL] + [m for m in AI_FALLBACK_MODELS if m != AI_MODEL]
+    last_err = None
+    for mi, model in enumerate(models):
+        try:
+            if mi > 0:
+                time.sleep(1.0)
+            summary = call_openai_compatible(MONTH_SYSTEM, user_prompt, timeout=120,
+                                             temperature=0.4, max_tokens=2048, model=model)
+            if call_openai_compatible.last_finish == "length":
+                print("[AI] monthly truncated, retrying...", flush=True)
+                summary = call_openai_compatible(MONTH_SYSTEM, user_prompt, timeout=120,
+                                                 temperature=0.4, max_tokens=2048, model=model)
+            return summary.strip(), _short_model(model)
+        except Exception as e:
+            print(f"[AI] monthly {model} failed: {str(e)[:200]}", flush=True)
+            last_err = e
+    return f"Сводка недоступна: {last_err}", "stub_fallback"
+
+
+def get_monthly(db_path, month_key):
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM ai_monthly WHERE month_key=?", (month_key,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def save_monthly(db_path, month_key, summary, source, stats_json=""):
+    from datetime import datetime, timezone
+    conn = sqlite3.connect(db_path)
+    conn.execute("INSERT OR REPLACE INTO ai_monthly (month_key, summary, source, stats_json, created_at)"
+                 " VALUES (?,?,?,?,?)",
+                 (month_key, summary, source, stats_json,
+                  datetime.now(timezone.utc).isoformat()))
+    conn.commit()
+    conn.close()
 
 AUTO_GEN_ENABLED = os.getenv("AUTO_GEN_ENABLED", "1").strip() not in ("0", "false", "no")
 AUTO_CHECK_MINUTES = int(os.getenv("AUTO_CHECK_MINUTES", "15") or 15)

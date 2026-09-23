@@ -33,9 +33,10 @@ app.jinja_env.filters["ru_date"] = ru_date
 init_db()  # SQLite теперь только для черновиков ИИ
 ai_helper.ensure_ai_table(DB_PATH)
 ai_helper.ensure_auto_tables(DB_PATH)
+ai_helper.ensure_monthly_table(DB_PATH)
 
 PER_PAGE = 20
-CODE_V = 7  # версия кода — видна в подвале сайта, чтобы понимать что запущено
+CODE_V = 8  # версия кода — видна в подвале сайта, чтобы понимать что запущено
 LIVE_MODE = os.getenv("LIVE_MODE", "1").strip() not in ("0", "false", "no")
 AUTO_CHECK_MINUTES = int(os.getenv("AUTO_CHECK_MINUTES", "15") or 15)
 _scheduler_started = False
@@ -321,6 +322,140 @@ def auto_toggle():
 @app.route("/api/auto-status")
 def api_auto_status():
     return jsonify(get_auto_status())
+
+
+STOPWORDS = set("""это как что для или при про без над под уже даже если когда которые которая которое
+всего всех меня тебя себя нас вас они оно она они был была было были есть будет будут можно надо нельзя
+очень просто только тоже также уже лишь даже ведь вот там тут здесь туда сюда поэтому потому однако зато
+чтобы чтоб пусть хотя между через после перед время раз два три меня мой моя мое мои наш наши ваш ваши
+его ее их тот эта это эти того этот всем всем всём меня тобой собой ними ними ними ними
+и в на с к о у а но не же ли бы по за от до из со во то ни да нет вы мы он ты я она оно они
+былa the and with for from that this these those are was were been have has had will would there their them
+he she they them his her its our your you me my we us our""".split())
+
+
+def _month_reviews(days=30):
+    """Все отзывы за последние N дней (LIVE, иначе SQLite-копия). Возвращает (month, all_r, meta)."""
+    from datetime import timedelta
+    try:
+        all_r, meta, _ = live_2gis.fetch_all_live()
+    except Exception:
+        conn = get_db()
+        rows = conn.execute("SELECT * FROM reviews ORDER BY date_created DESC LIMIT 2000").fetchall()
+        conn.close()
+        all_r = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["photos"] = json.loads(d.get("photos_json") or "[]")
+            except Exception:
+                d["photos"] = []
+            all_r.append(d)
+        meta = {}
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    month = []
+    for r in all_r:
+        try:
+            from datetime import datetime as _dt
+            dt = _dt.fromisoformat(str(r.get("date_created") or "").replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            r["_dt"] = dt
+            if dt >= cutoff:
+                month.append(r)
+        except Exception:
+            pass
+    month.sort(key=lambda x: x.get("_dt"), reverse=True)
+    return month, all_r, meta
+
+
+def _month_stats(month):
+    import re
+    from collections import Counter
+    dist = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
+    s = 0
+    with_text = 0
+    with_photos = 0
+    words = Counter()
+    for r in month:
+        try:
+            rt = int(r.get("rating") or 0)
+        except Exception:
+            rt = 0
+        if rt in dist:
+            dist[rt] += 1
+            s += rt
+        t = (r.get("text") or "")
+        if t.strip():
+            with_text += 1
+        if r.get("photos"):
+            with_photos += 1
+        for w in re.findall(r"[а-яёa-z]{4,}", t.lower()):
+            if w not in STOPWORDS:
+                words[w] += 1
+    n = len(month)
+    return {"count": n, "avg": round(s / n, 2) if n else 0, "dist": dist,
+            "pos": dist[4] + dist[5], "neu": dist[3], "neg": dist[1] + dist[2],
+            "with_text": with_text, "with_photos": with_photos,
+            "top_words": words.most_common(18)}
+
+
+@app.route("/analytics")
+def analytics():
+    try:
+        days = max(7, min(365, int(request.args.get("days", 30))))
+    except ValueError:
+        days = 30
+    month, all_r, meta = _month_reviews(days)
+    stats = _month_stats(month)
+    # динамика по дням
+    from datetime import timedelta
+    today = datetime.now(timezone.utc).date()
+    per_day = []
+    by_day = {}
+    for r in month:
+        d = r["_dt"].date().isoformat()
+        by_day.setdefault(d, {"n": 0, "s": 0})
+        by_day[d]["n"] += 1
+        try:
+            by_day[d]["s"] += int(r.get("rating") or 0)
+        except Exception:
+            pass
+    for i in range(days - 1, -1, -1):
+        d = (today - timedelta(days=i)).isoformat()
+        b = by_day.get(d, {"n": 0, "s": 0})
+        per_day.append({"date": d[5:], "n": b["n"],
+                        "avg": round(b["s"] / b["n"], 1) if b["n"] else 0})
+    maxn = max([p["n"] for p in per_day] + [1])
+    month_key = f"last{days}_{stats['count']}_{month[0]['_dt'].date().isoformat() if month else 'empty'}"
+    cached = ai_helper.get_monthly(DB_PATH, month_key)
+    branch = live_2gis.branch_live(meta) if LIVE_MODE else get_branch()
+    label = f"последние {days} дней"
+    return render_template("analytics.html", branch=branch, days=days, stats=stats,
+                           per_day=per_day, maxn=maxn, month_key=month_key,
+                           cached=cached, label=label, ai_model=ai_helper.AI_MODEL,
+                           code_v=CODE_V)
+
+
+@app.route("/api/month-summary", methods=["POST"])
+def month_summary():
+    try:
+        body = request.get_json(force=False, silent=True) or {}
+        days = max(7, min(365, int(body.get("days", 30))))
+    except Exception:
+        days = 30
+    month, all_r, meta = _month_reviews(days)
+    if not month:
+        return jsonify({"ok": False, "error": "нет отзывов за период"})
+    stats = _month_stats(month)
+    import json as _json
+    month_key = f"last{days}_{stats['count']}_{month[0]['_dt'].date().isoformat()}"
+    label = f"последние {days} дней"
+    branch = live_2gis.branch_live(meta) if LIVE_MODE else get_branch()
+    summary, source = ai_helper.summarize_month(month, branch.get("name") or BRANCH_NAME, label)
+    ai_helper.save_monthly(DB_PATH, month_key, summary, source,
+                           _json.dumps(stats, ensure_ascii=False))
+    return jsonify({"ok": True, "summary": summary, "source": source, "month_key": month_key})
 
 
 @app.route("/ai-reply/<review_id>", methods=["POST"])

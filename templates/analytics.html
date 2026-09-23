@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Аналитика · {{ branch.name }}</title>
+<style>
+  :root{--bg:#f6f7f9;--card:#fff;--ink:#14171c;--muted:#6b7280;--line:#e7e9ee;
+    --brand:#16a34a;--brand-dark:#15803d;--star:#f59e0b;--bad:#dc2626;--radius:14px}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,"Segoe UI",Roboto,Arial,sans-serif}
+  .topbar{position:sticky;top:0;z-index:20;background:rgba(255,255,255,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+  .topbar-in{max-width:960px;margin:0 auto;padding:10px 16px;display:flex;align-items:center;gap:10px}
+  .logo{width:32px;height:32px;border-radius:10px;background:var(--brand);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:18px}
+  .brand{font-weight:700}.brand small{display:block;font-weight:400;color:var(--muted);font-size:12px}
+  .topbar .sp{flex:1}
+  a{color:#111}
+  button{font-size:14px;padding:10px 16px;border-radius:10px;border:1px solid var(--line);background:#fff;cursor:pointer;font-weight:600}
+  button.primary{background:var(--ink);color:#fff;border-color:var(--ink)}
+  .wrap{max-width:960px;margin:0 auto;padding:20px 16px 70px}
+  h1{margin:0;font-size:24px;letter-spacing:-.02em}
+  .muted{color:var(--muted);font-size:13px}
+  .tabs{display:flex;gap:8px;margin:14px 0;flex-wrap:wrap}
+  .tabs a{padding:8px 14px;border-radius:999px;border:1px solid var(--line);background:#fff;font-size:13px;text-decoration:none;color:var(--ink)}
+  .tabs a.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+  .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:14px 0}
+  .tile{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:14px}
+  .tile b{font-size:30px;letter-spacing:-.02em}
+  .tile span{display:block;color:var(--muted);font-size:12px;margin-top:2px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:16px;margin:12px 0}
+  .card h3{margin:0 0 10px;font-size:16px}
+  .drow{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);margin:5px 0}
+  .drow .bar{flex:1;height:10px;background:#eef0f4;border-radius:99px;overflow:hidden}
+  .drow .bar i{display:block;height:100%;background:var(--star);border-radius:99px}
+  .chart{display:flex;align-items:flex-end;gap:3px;height:150px;border-bottom:1px solid var(--line);padding-top:6px}
+  .col{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;min-width:0}
+  .col i{width:100%;max-width:22px;background:var(--brand);border-radius:4px 4px 0 0;min-height:2px}
+  .col.zero i{background:#e2e5eb}
+  .col span{font-size:9px;color:var(--muted);margin-top:3px;white-space:nowrap}
+  .chips{display:flex;gap:8px;flex-wrap:wrap}
+  .chip{border:1px solid var(--line);background:#f6f7f9;border-radius:999px;padding:5px 12px;font-size:13px}
+  .chip b{color:var(--brand-dark)}
+  .sumbox{background:#f4f6ff;border:1px dashed #a5b4fc;border-radius:12px;padding:14px;white-space:pre-wrap;line-height:1.6;font-size:14px}
+  .foot{text-align:center;color:var(--muted);font-size:12px;margin-top:26px}
+</style>
+</head>
+<body>
+<div class="topbar"><div class="topbar-in">
+  <div class="logo">2</div>
+  <div class="brand">{{ branch.name }}<small>Аналитика отзывов · {{ label }}</small></div>
+  <div class="sp"></div>
+  <a href="/"><button>← К отзывам</button></a>
+</div></div>
+<div class="wrap">
+  <h1>📊 Аналитика за {{ label }}</h1>
+  <div class="muted">{{ branch.rating }} ★ на 2ГИС · всего в выборке: {{ stats.count }}</div>
+  <div class="tabs">
+    <a href="/analytics?days=7" class="{% if days==7 %}on{% endif %}">7 дней</a>
+    <a href="/analytics?days=30" class="{% if days==30 %}on{% endif %}">30 дней</a>
+    <a href="/analytics?days=90" class="{% if days==90 %}on{% endif %}">90 дней</a>
+  </div>
+
+  <div class="tiles">
+    <div class="tile"><b>{{ stats.count }}</b><span>отзывов за период</span></div>
+    <div class="tile"><b>{{ stats.avg }}</b><span>средняя оценка</span></div>
+    <div class="tile"><b style="color:var(--brand-dark)">{{ stats.pos }}</b><span>позитивных (4–5★)</span></div>
+    <div class="tile"><b style="color:var(--bad)">{{ stats.neg }}</b><span>негативных (1–2★)</span></div>
+    <div class="tile"><b>{{ stats.neu }}</b><span>нейтральных (3★)</span></div>
+    <div class="tile"><b>{{ stats.with_photos }}</b><span>с фото</span></div>
+  </div>
+
+  <div class="card"><h3>Распределение оценок</h3>
+    {% for s in [5,4,3,2,1] %}
+    <div class="drow"><span style="width:20px">{{ s }}★</span>
+      <div class="bar"><i style="width:{{ (stats.dist[s]/stats.count*100) if stats.count else 0 }}%"></i></div>
+      <span style="width:40px;text-align:right">{{ stats.dist[s] }}</span></div>
+    {% endfor %}
+  </div>
+
+  <div class="card"><h3>Динамика по дням (кол-во отзывов)</h3>
+    <div class="chart">
+      {% for p in per_day %}
+      <div class="col {% if p.n==0 %}zero{% endif %}" title="{{ p.date }}: {{ p.n }} (ср. {{ p.avg }})">
+        <i style="height:{{ (p.n/maxn*130) if maxn else 2 }}px"></i><span>{{ p.date }}</span>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="card"><h3>О чём пишут чаще всего</h3>
+    <div class="chips">
+      {% for w,c in stats.top_words %}
+      <span class="chip">{{ w }} <b>{{ c }}</b></span>
+      {% else %}<span class="muted">недостаточно текста</span>{% endfor %}
+    </div>
+  </div>
+
+  <div class="card"><h3>🤖 Сводка месяца от ИИ ({{ ai_model }})</h3>
+    <div class="sumbox" id="sumbox">{% if cached %}{{ cached.summary }}{% else %}Нажми кнопку — ИИ прочитает все {{ stats.count }} отзывов и выдаст выводы, плюсы/минусы и что исправить.{% endif %}</div>
+    <div style="display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap">
+      <button class="primary" id="sumbtn" type="button">Сгенерировать сводку</button>
+      {% if cached %}<span class="muted">сохранена {{ cached.created_at|ru_date }} · {{ cached.source }}</span>{% endif %}
+    </div>
+  </div>
+
+  <div class="foot">2GIS Reviews · v{{ code_v }} · {{ stats.count }} отзывов за {{ label }}</div>
+</div>
+<script>
+document.getElementById('sumbtn').addEventListener('click', async (e) => {
+  const btn = e.target, box = document.getElementById('sumbox');
+  btn.disabled = true; btn.textContent = 'Читаю отзывы...';
+  try {
+    const res = await fetch('/api/month-summary', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({days: {{ days }}})});
+    const j = await res.json();
+    if (j.ok) box.textContent = j.summary;
+    else alert('Ошибка: ' + (j.error || 'unknown'));
+  } catch (err) { alert('Ошибка сети: ' + err); }
+  finally { btn.disabled = false; btn.textContent = 'Сгенерировать сводку'; }
+});
+</script>
+</body>
+</html>
