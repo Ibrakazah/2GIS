@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.pyc
+reviews.db
+*.log
+server_*.log
