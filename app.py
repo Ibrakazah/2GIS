@@ -36,19 +36,31 @@ ai_helper.ensure_auto_tables(DB_PATH)
 ai_helper.ensure_monthly_table(DB_PATH)
 
 PER_PAGE = 20
-CODE_V = 8  # версия кода — видна в подвале сайта, чтобы понимать что запущено
+CODE_V = 9  # версия кода — видна в подвале сайта, чтобы понимать что запущено
 LIVE_MODE = os.getenv("LIVE_MODE", "1").strip() not in ("0", "false", "no")
 AUTO_CHECK_MINUTES = int(os.getenv("AUTO_CHECK_MINUTES", "15") or 15)
 _scheduler_started = False
 
-# LIVE-память: какие отзывы уже видели (базовая линия = первый заход после старта).
-# Базы отзывов больше нет — новые определяем сравнением с этим множеством.
-_known_ids = set()
-_baseline_at = ""
+# Текущее заведение (по умолчанию Генацвале). Переключается вставкой ссылки 2ГИС.
+CUR = {"firm_id": str(FIRM_ID)}
+# LIVE-память по заведениям: какие отзывы уже видели (базовая линия = первый заход).
+_known_by_firm = {}
+_baseline_by_firm = {}
 _auto_enabled = True
 _last_check = ""
 _last_gen = ""
 _last_gen_count = 0
+
+
+def cur_firm():
+    return str(CUR.get("firm_id") or FIRM_ID)
+
+
+def cur_name():
+    try:
+        return live_2gis.branch_info(cur_firm()).get("name") or BRANCH_NAME
+    except Exception:
+        return BRANCH_NAME
 
 
 def get_db():
@@ -68,51 +80,55 @@ def get_branch():
             "url": BRANCH_URL, "short_url": SHORT_URL, "updated_at": ""}
 
 
-def detect_new_live(all_reviews):
+def detect_new_live(all_reviews, firm_id=None):
     """Сравнение с памятью: первый заход = базовая линия, дальше — новые. Возвращает список новых."""
-    global _baseline_at
     global _last_check
+    firm_id = str(firm_id or cur_firm())
+    known = _known_by_firm.setdefault(firm_id, set())
     _last_check = datetime.now(timezone.utc).isoformat()
-    if not _known_ids:
+    if not known:
         for r in all_reviews:
-            _known_ids.add(str(r["id"]))
-        _baseline_at = _last_check
+            known.add(str(r["id"]))
+        _baseline_by_firm[firm_id] = _last_check
         return []
-    fresh = [r for r in all_reviews if str(r["id"]) not in _known_ids]
+    fresh = [r for r in all_reviews if str(r["id"]) not in known]
     for r in fresh:
-        _known_ids.add(str(r["id"]))
+        known.add(str(r["id"]))
     return sorted(fresh, key=lambda x: x.get("date_created") or "", reverse=True)
 
 
 def get_auto_status():
+    firm_id = cur_firm()
     try:
         conn = get_db()
         drafts = conn.execute("SELECT COUNT(*) c FROM ai_drafts").fetchone()["c"]
         conn.close()
     except Exception:
         drafts = 0
-    return {"enabled": _auto_enabled, "known": len(_known_ids), "pending": 0, "drafts": drafts,
-            "baseline_at": _baseline_at, "last_check": _last_check,
+    return {"enabled": _auto_enabled, "known": len(_known_by_firm.get(firm_id, set())), "pending": 0,
+            "drafts": drafts, "baseline_at": _baseline_by_firm.get(firm_id, ""),
+            "last_check": _last_check,
             "last_auto_gen": _last_gen, "last_auto_count": str(_last_gen_count),
             "interval_min": AUTO_CHECK_MINUTES, "model": ai_helper.AI_MODEL,
-            "live": LIVE_MODE}
+            "live": LIVE_MODE, "firm_id": firm_id}
 
 
 def auto_check_cycle():
     """Одна итерация фона: свежие отзывы с 2ГИС + автогенерация (по 3 варианта) для новых."""
     global _last_gen, _last_gen_count
+    firm_id = cur_firm()
     try:
-        all_r, meta, _ = live_2gis.fetch_all_live(force=True)
+        all_r, meta, _ = live_2gis.fetch_all_live(firm_id, force=True)
     except Exception as e:
         return {"ok": False, "error": f"live fetch: {e}"}
-    fresh = detect_new_live(all_r)
+    fresh = detect_new_live(all_r, firm_id)
     if not fresh or not _auto_enabled:
         return {"ok": True, "parsed": len(all_r), "new_drafts": 0, "details": []}
     gen = []
     for r in fresh[:ai_helper.AUTO_MAX_PER_RUN]:
         try:
             variants, source = ai_helper.generate_ai_variants(
-                r.get("author") or "Гость", r.get("rating") or 0, r.get("text") or "", BRANCH_NAME)
+                r.get("author") or "Гость", r.get("rating") or 0, r.get("text") or "", cur_name())
             ai_helper.save_draft(DB_PATH, str(r["id"]), ai_helper.pack_variants(variants), source)
             gen.append({"review_id": str(r["id"]), "source": source})
         except Exception as e:
@@ -159,11 +175,12 @@ def index():
         page = 1
     updated = request.args.get("updated")
     live_cached = True
+    firm_id = cur_firm()
 
     if LIVE_MODE:
         # ЖИВОЙ режим: отзывы напрямую с 2ГИС, без базы. Кэш 60 сек.
         try:
-            all_r, meta, live_cached = live_2gis.fetch_all_live()
+            all_r, meta, live_cached = live_2gis.fetch_all_live(firm_id)
         except Exception as e:
             # если 2ГИС недоступен — показываем что есть в старой SQLite-копии
             conn = get_db()
@@ -179,16 +196,16 @@ def index():
                 all_r.append(d)
             meta = {}
             updated = updated or f"2ГИС недоступен ({e}), показан кэш из базы"
-        fresh = detect_new_live(all_r)
+        fresh = detect_new_live(all_r, firm_id)
         if fresh and _auto_enabled:
-            def _bg(items):
+            def _bg(items, fid):
                 global _last_gen, _last_gen_count
                 gen = []
                 for r in items[:ai_helper.AUTO_MAX_PER_RUN]:
                     try:
                         variants, source = ai_helper.generate_ai_variants(
                             r.get("author") or "Гость", r.get("rating") or 0,
-                            r.get("text") or "", BRANCH_NAME)
+                            r.get("text") or "", cur_name())
                         ai_helper.save_draft(DB_PATH, str(r["id"]), ai_helper.pack_variants(variants), source)
                         gen.append(source)
                     except Exception:
@@ -197,8 +214,8 @@ def index():
                 if gen:
                     _last_gen = datetime.now(timezone.utc).isoformat()
                     _last_gen_count = len(gen)
-            threading.Thread(target=_bg, args=(fresh,), daemon=True).start()
-        branch = live_2gis.branch_live(meta)
+            threading.Thread(target=_bg, args=(fresh, firm_id), daemon=True).start()
+        branch = live_2gis.branch_live(meta, firm_id)
         # фильтр + сортировка по дате публикации в памяти
         filt = all_r
         if q:
@@ -296,7 +313,7 @@ def index():
 def do_parse():
     if LIVE_MODE:
         # мгновенный ответ: обновление идет в фоне, страница сразу из теплого кэша
-        live_2gis.refresh_in_background()
+        live_2gis.refresh_in_background(cur_firm())
         return redirect(url_for("index", updated="bg"))
     saved, meta = parse_all()
     def _bg():
@@ -309,13 +326,34 @@ def do_parse():
     return redirect(url_for("index", updated=saved))
 
 
+@app.route("/branch", methods=["POST"])
+def switch_branch():
+    """Вставить ссылку 2ГИС (Поделиться) — сайт переключается на это заведение."""
+    url = (request.form.get("url") or "").strip()
+    try:
+        fid = live_2gis.resolve_share_url(url)
+    except Exception as e:
+        return redirect(url_for("index", updated=f"ссылка не разобралась: {e}"))
+    if not fid:
+        return redirect(url_for("index", updated="не нашел заведение в ссылке :("))
+    CUR["firm_id"] = str(fid)
+    try:
+        live_2gis.branch_info(fid)  # прогреть название заранее
+    except Exception:
+        pass
+    return redirect(url_for("index", updated=f"переключено: {cur_name()}"))
+
+
+@app.route("/branch/reset")
+def reset_branch():
+    CUR["firm_id"] = str(FIRM_ID)
+    return redirect(url_for("index"))
+
+
 @app.route("/auto-toggle", methods=["POST"])
 def auto_toggle():
-    global _auto_enabled, _baseline_at
+    global _auto_enabled
     _auto_enabled = not _auto_enabled
-    if _auto_enabled and not _known_ids:
-        # при включении с пустой памятью — следующий заход станет базовой линией
-        _baseline_at = ""
     return redirect(url_for("index"))
 
 
@@ -334,11 +372,11 @@ STOPWORDS = set("""это как что для или при про без на�
 he she they them his her its our your you me my we us our""".split())
 
 
-def _month_reviews(days=30):
+def _month_reviews(firm_id=None, days=30):
     """Все отзывы за последние N дней (LIVE, иначе SQLite-копия). Возвращает (month, all_r, meta)."""
     from datetime import timedelta
     try:
-        all_r, meta, _ = live_2gis.fetch_all_live()
+        all_r, meta, _ = live_2gis.fetch_all_live(firm_id or cur_firm())
     except Exception:
         conn = get_db()
         rows = conn.execute("SELECT * FROM reviews ORDER BY date_created DESC LIMIT 2000").fetchall()
@@ -406,7 +444,7 @@ def analytics():
         days = max(7, min(365, int(request.args.get("days", 30))))
     except ValueError:
         days = 30
-    month, all_r, meta = _month_reviews(days)
+    month, all_r, meta = _month_reviews(cur_firm(), days)
     stats = _month_stats(month)
     # динамика по дням
     from datetime import timedelta
@@ -427,9 +465,10 @@ def analytics():
         per_day.append({"date": d[5:], "n": b["n"],
                         "avg": round(b["s"] / b["n"], 1) if b["n"] else 0})
     maxn = max([p["n"] for p in per_day] + [1])
-    month_key = f"last{days}_{stats['count']}_{month[0]['_dt'].date().isoformat() if month else 'empty'}"
+    firm_id = cur_firm()
+    month_key = f"{firm_id}_last{days}_{stats['count']}_{month[0]['_dt'].date().isoformat() if month else 'empty'}"
     cached = ai_helper.get_monthly(DB_PATH, month_key)
-    branch = live_2gis.branch_live(meta) if LIVE_MODE else get_branch()
+    branch = live_2gis.branch_live(meta, firm_id) if LIVE_MODE else get_branch()
     label = f"последние {days} дней"
     return render_template("analytics.html", branch=branch, days=days, stats=stats,
                            per_day=per_day, maxn=maxn, month_key=month_key,
@@ -444,15 +483,15 @@ def month_summary():
         days = max(7, min(365, int(body.get("days", 30))))
     except Exception:
         days = 30
-    month, all_r, meta = _month_reviews(days)
+    month, all_r, meta = _month_reviews(cur_firm(), days)
     if not month:
         return jsonify({"ok": False, "error": "нет отзывов за период"})
     stats = _month_stats(month)
     import json as _json
-    month_key = f"last{days}_{stats['count']}_{month[0]['_dt'].date().isoformat()}"
+    month_key = f"{cur_firm()}_last{days}_{stats['count']}_{month[0]['_dt'].date().isoformat()}"
     label = f"последние {days} дней"
-    branch = live_2gis.branch_live(meta) if LIVE_MODE else get_branch()
-    summary, source = ai_helper.summarize_month(month, branch.get("name") or BRANCH_NAME, label)
+    branch = live_2gis.branch_live(meta, cur_firm()) if LIVE_MODE else get_branch()
+    summary, source = ai_helper.summarize_month(month, branch.get("name") or cur_name(), label)
     ai_helper.save_monthly(DB_PATH, month_key, summary, source,
                            _json.dumps(stats, ensure_ascii=False))
     return jsonify({"ok": True, "summary": summary, "source": source, "month_key": month_key})
@@ -472,7 +511,7 @@ def ai_reply(review_id):
     regen = bool(body.get("regen"))
     found = None
     try:
-        all_r, _, _ = live_2gis.fetch_all_live()
+        all_r, _, _ = live_2gis.fetch_all_live(cur_firm())
         for r in all_r:
             if str(r["id"]) == rid:
                 found = r
@@ -488,7 +527,7 @@ def ai_reply(review_id):
     if not found:
         return jsonify({"ok": False, "error": "review not found"}), 404
     variants, source = ai_helper.generate_ai_variants(
-        found.get("author") or "Гость", found.get("rating") or 0, found.get("text") or "", BRANCH_NAME,
+        found.get("author") or "Гость", found.get("rating") or 0, found.get("text") or "", cur_name(),
         previous=previous[:3], temperature=1.0 if regen else 0.7)
     ai_helper.save_draft(DB_PATH, rid, ai_helper.pack_variants(variants), source)
     return jsonify({"ok": True, "review_id": rid, "variants": variants, "source": source})
@@ -516,7 +555,7 @@ def drafts_clear():
 @app.route("/api/reviews")
 def api_reviews():
     try:
-        all_r, meta, cached = live_2gis.fetch_all_live()
+        all_r, meta, cached = live_2gis.fetch_all_live(cur_firm())
         return jsonify(all_r[:1000])
     except Exception as e:
         return jsonify({"error": str(e)}), 502

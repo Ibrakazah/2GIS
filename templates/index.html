@@ -50,6 +50,7 @@
   button.green{background:var(--brand);border-color:var(--brand);color:#fff}
   button.green:hover{background:var(--brand-dark)}
   button:disabled{opacity:.55;cursor:default;transform:none}
+  .branchform input{font-size:14px;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:#fff;flex:1;min-width:220px}
   .auto{margin-top:14px;background:var(--ai-bg);border:1px solid var(--ai-line);border-radius:var(--radius);padding:14px 16px;font-size:13px}
   .auto b{font-size:14px}
   .toolbar{position:sticky;top:53px;z-index:10;background:rgba(246,247,249,.94);backdrop-filter:blur(8px);
@@ -117,8 +118,14 @@
       {% if branch.updated_at %}· обновлено {{ branch.updated_at|ru_date }}{% endif %}</div>
     <div class="actions">
       <form action="/parse" method="post"><button class="green" type="submit">↻ Обновить</button></form>
+      <a href="/analytics" style="text-decoration:none"><button class="primary" type="button">📊 Аналитика месяца</button></a>
       <span class="tag">{% if live_mode %}LIVE: напрямую с 2ГИС{% if live_cached %} · из кэша{% else %} · только что{% endif %}{% else %}из базы · {{ branch.reviews_count or db_count }}{% endif %}</span>
     </div>
+    <form action="/branch" method="post" class="branchform" style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+      <input type="text" name="url" placeholder="🔗 Вставь ссылку из 2ГИС (кнопка «Поделиться») — сайт переключится на это заведение">
+      <button type="submit">Переключить заведение</button>
+      {% if branch.firm_id != '70000001033566614' %}<a href="/branch/reset" style="align-self:center;font-size:13px">← назад к Генацвале</a>{% endif %}
+    </form>
     <div class="auto">
       <b>✨ Автогенерация ИИ для новых отзывов</b>
       {% if auto.enabled %}<span class="tag">ВКЛ</span>{% else %}<span class="tag">ВЫКЛ</span>{% endif %}
