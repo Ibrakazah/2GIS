@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: gis-reviews
+    runtime: docker
+    # Free-план засыпает без трафика (не 24/7). Для круглосуточно — Starter и выше.
+    plan: free
+    healthCheckPath: /api/auto-status
+    envVars:
+      - key: AI_API_KEY
+        sync: false
+      - key: AI_API_BASE
+        value: https://openrouter.ai/api/v1
+      - key: AI_MODEL
+        value: nvidia/nemotron-3-ultra-550b-a55b:free
+      - key: AI_FALLBACK_MODELS
+        value: nvidia/nemotron-3-ultra-550b-a55b,qwen/qwen3.8-27b
+      - key: LIVE_MODE
+        value: "1"
+      - key: LIVE_CACHE_TTL
+        value: "120"
+      - key: AUTO_CHECK_MINUTES
+        value: "15"
