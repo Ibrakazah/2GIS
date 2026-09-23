@@ -4,3 +4,6 @@ __pycache__/
 reviews.db
 *.log
 server_*.log
+KEYS_FOR_DEPLOY.txt
+server.log
+server.err.log
